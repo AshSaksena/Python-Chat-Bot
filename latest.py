@@ -101,4 +101,126 @@ def process_and_ingest(file):
         try:
             response = clients['bedrock'].create_knowledge_base_document(
                 knowledgeBaseId=KB_ID,
-                data
+                dataSourceId=DATA_SOURCE_ID,
+                document={
+                    'content': {
+                        'text': extracted_text
+                    },
+                    'metadata': {
+                        'filename': file.name,
+                        'uploaded_at': str(time.time())
+                    }
+                }
+            )
+            # Wait for ingestion to complete
+            doc_id = response['document']['documentId']
+            if not wait_for_document_ingestion(KB_ID, DATA_SOURCE_ID, doc_id):
+                st.error(f"Ingestion timed out or failed for {file.name}.")
+                return False
+            update_manifest(file.name)
+            return True
+        except clients['bedrock'].exceptions.ConflictException:
+            st.warning(f"{file.name} already exists in KB")
+            update_manifest(file.name)
+            return True
+        except Exception as e:
+            st.error(f"Ingestion failed: {str(e)}")
+            return False
+
+def wait_for_document_ingestion(kb_id, ds_id, doc_id, timeout=600):
+    start = time.time()
+    while True:
+        try:
+            resp = clients['bedrock'].get_knowledge_base_document(
+                knowledgeBaseId=kb_id,
+                dataSourceId=ds_id,
+                documentId=doc_id
+            )
+            status = resp['document']['status']
+            if status == "INGESTED":
+                return True
+            if status in ("FAILED", "DELETED"):
+                return False
+            if time.time() - start > timeout:
+                return False
+            time.sleep(5)
+        except Exception as e:
+            st.error(f"Error checking document ingestion status: {e}")
+            return False
+
+# ===== Chatbot Function =====
+def get_rag_response(query, session_id):
+    prompt_template = f"""You are an Oncology Clinical Specialty ChatBot Assistant.
+Use only the information in the knowledge base to answer the question.
+
+Question: {query}
+
+Answer with clinical accuracy. If uncertain, state "I need to consult medical records"."""
+    try:
+        response = clients['bedrock-agent'].retrieve_and_generate(
+            input={'text': query},
+            retrieveAndGenerateConfiguration={
+                'knowledgeBaseConfiguration': {
+                    'generationConfiguration': {
+                        'promptTemplate': {'textPromptTemplate': prompt_template}
+                    },
+                    'knowledgeBaseId': KB_ID,
+                    'modelArn': MODEL_ARN
+                },
+                'type': 'KNOWLEDGE_BASE'
+            },
+            sessionId=session_id
+        )
+        return response['output']['text'], response.get('sessionId', session_id)
+    except Exception as e:
+        st.error(f"Clinical error: {str(e)}")
+        return "Please consult your physician for immediate concerns.", session_id
+
+# ===== Streamlit UI =====
+st.title("Oncology Clinical Specialty ChatBot Assistant 🩺")
+
+if 'session_id' not in st.session_state:
+    st.session_state.session_id = str(uuid.uuid4())
+
+if 'messages' not in st.session_state:
+    st.session_state.messages = []
+
+with st.expander("Please Upload Patient Lab Reports and Prescription Notes (PDF)"):
+    uploaded_files = st.file_uploader(
+        "Upload Patient Lab Reports and Prescription Notes (PDF only)",
+        type=['pdf'],
+        accept_multiple_files=True
+    )
+
+    if uploaded_files:
+        manifest = {entry['filename'] for entry in download_manifest()}
+        for file in uploaded_files:
+            if file.name in manifest:
+                st.success(f"{file.name} already ingested")
+                continue
+            if process_and_ingest(file):
+                st.success(f"Successfully processed {file.name}")
+
+st.divider()
+
+# Chat Interface
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.write(msg["content"])
+
+if user_input := st.chat_input("Ask about patient records..."):
+    st.chat_message("user").write(user_input)
+    with st.spinner("Consulting medical knowledge..."):
+        response, new_session = get_rag_response(
+            user_input,
+            st.session_state.session_id
+        )
+        st.session_state.session_id = new_session
+
+    with st.chat_message("assistant"):
+        st.write(response)
+
+    st.session_state.messages.extend([
+        {"role": "user", "content": user_input},
+        {"role": "assistant", "content": response}
+    ])
