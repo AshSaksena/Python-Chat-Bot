@@ -8,7 +8,7 @@ from botocore.exceptions import ClientError, BotoCoreError
 # ===== AWS Configuration =====
 AWS_ACCESS_KEY_ID = st.secrets["AWS_ACCESS_KEY_ID"]
 AWS_SECRET_ACCESS_KEY = st.secrets["AWS_SECRET_ACCESS_KEY"]
-AWS_REGION = st.secrets["AWS_DEFAULT_REGION"]
+AWS_REGION = st.secrets["AWS_REGION"]
 S3_BUCKET = st.secrets["S3_BUCKET"]  # For manifest only
 MANIFEST_KEY = st.secrets["MANIFEST_KEY"]  # From secrets
 KB_ID = st.secrets["KB_ID"]
