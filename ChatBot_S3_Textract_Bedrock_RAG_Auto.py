@@ -136,6 +136,32 @@ def wait_for_bedrock_ingestion(job_id, timeout=600):
         st.error(f"Error checking ingestion job status: {e}")
         return False
 
+def sync_bedrock_knowledge_base():
+    try:
+        response = clients['bedrock-kb'].sync_knowledge_base(
+            knowledgeBaseId=KB_ID
+        )
+        sync_job_id = response['syncJob']['syncJobId']
+        start = time.time()
+        while True:
+            status_resp = clients['bedrock-kb'].get_sync_job(
+                knowledgeBaseId=KB_ID,
+                syncJobId=sync_job_id
+            )
+            status = status_resp['syncJob']['status']
+            if status == "COMPLETED":
+                return True
+            if status in ("FAILED", "STOPPED"):
+                st.error(f"Knowledge base sync job {sync_job_id} failed or stopped.")
+                return False
+            if time.time() - start > 600:
+                st.error(f"Knowledge base sync job {sync_job_id} timed out.")
+                return False
+            time.sleep(5)
+    except Exception as e:
+        st.error(f"Error syncing Bedrock Knowledge Base: {e}")
+        return False
+
 def get_rag_response(query, session_id):
     prompt_template = f"""You are an oncology specialist assistant.
     Use only the information in the knowledge base to answer the question.
@@ -231,18 +257,24 @@ for msg in st.session_state.messages:
         st.write(msg["content"])
 
 if user_input := st.chat_input("Ask about patient records..."):
-    st.chat_message("user").write(user_input)
-    with st.spinner("Consulting medical knowledge..."):
-        response, new_session = get_rag_response(
-            user_input,
-            st.session_state.session_id
-        )
-        st.session_state.session_id = new_session
+    # Sync knowledge base before inference
+    with st.spinner("Syncing knowledge base with latest data..."):
+        sync_success = sync_bedrock_knowledge_base()
+    if not sync_success:
+        st.error("Knowledge base sync failed. Please try again later.")
+    else:
+        st.chat_message("user").write(user_input)
+        with st.spinner("Consulting medical knowledge..."):
+            response, new_session = get_rag_response(
+                user_input,
+                st.session_state.session_id
+            )
+            st.session_state.session_id = new_session
 
-    with st.chat_message("assistant"):
-        st.write(response)
+        with st.chat_message("assistant"):
+            st.write(response)
 
-    st.session_state.messages.extend([
-        {"role": "user", "content": user_input},
-        {"role": "assistant", "content": response}
-    ])
+        st.session_state.messages.extend([
+            {"role": "user", "content": user_input},
+            {"role": "assistant", "content": response}
+        ])
