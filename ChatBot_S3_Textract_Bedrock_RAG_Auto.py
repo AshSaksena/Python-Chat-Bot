@@ -26,10 +26,10 @@ def get_aws_clients():
         'textract': boto3.client('textract', region_name=AWS_REGION,
                       aws_access_key_id=AWS_ACCESS_KEY_ID,
                       aws_secret_access_key=AWS_SECRET_ACCESS_KEY),
-        'bedrock-agent': boto3.client('bedrock-agent-runtime', region_name=AWS_REGION,
+        'bedrock-agent-runtime': boto3.client('bedrock-agent-runtime', region_name=AWS_REGION,
                              aws_access_key_id=AWS_ACCESS_KEY_ID,
                              aws_secret_access_key=AWS_SECRET_ACCESS_KEY),
-        'bedrock-kb': boto3.client('bedrock', region_name=AWS_REGION,
+        'bedrock-agent': boto3.client('bedrock-agent', region_name=AWS_REGION,
                              aws_access_key_id=AWS_ACCESS_KEY_ID,
                              aws_secret_access_key=AWS_SECRET_ACCESS_KEY),
         's3': boto3.client('s3', region_name=AWS_REGION,
@@ -107,7 +107,7 @@ def process_doc_with_textract(file_bytes):
 
 def start_bedrock_kb_ingestion(s3_uri):
     try:
-        response = clients['bedrock-kb'].start_ingestion_job(
+        response = clients['bedrock-agent'].start_ingestion_job(
             knowledgeBaseId=KB_ID,
             dataSource={'s3': {'uri': s3_uri}}
         )
@@ -121,7 +121,7 @@ def wait_for_bedrock_ingestion(job_id, timeout=600):
     try:
         start = time.time()
         while True:
-            resp = clients['bedrock-kb'].get_ingestion_job(
+            resp = clients['bedrock-agent'].get_ingestion_job(
                 knowledgeBaseId=KB_ID,
                 ingestionJobId=job_id
             )
@@ -141,13 +141,13 @@ def wait_for_bedrock_ingestion(job_id, timeout=600):
 
 def sync_bedrock_knowledge_base():
     try:
-        response = clients['bedrock-kb'].sync_knowledge_base(
+        response = clients['bedrock-agent'].sync_knowledge_base(
             knowledgeBaseId=KB_ID
         )
         sync_job_id = response['syncJob']['syncJobId']
         start = time.time()
         while True:
-            status_resp = clients['bedrock-kb'].get_sync_job(
+            status_resp = clients['bedrock-agent'].get_sync_job(
                 knowledgeBaseId=KB_ID,
                 syncJobId=sync_job_id
             )
@@ -173,7 +173,7 @@ def get_rag_response(query, session_id):
 
     Answer with clinical accuracy. If uncertain, state "I need to consult medical records"."""
     try:
-        response = clients['bedrock-agent'].retrieve_and_generate(
+        response = clients['bedrock-agent-runtime'].retrieve_and_generate(
             input={'text': query},
             retrieveAndGenerateConfiguration={
                 'knowledgeBaseConfiguration': {
