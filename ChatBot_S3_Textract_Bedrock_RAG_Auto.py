@@ -15,6 +15,7 @@ S3_BUCKET = st.secrets["S3_BUCKET"]
 S3_PREFIX = st.secrets.get("S3_PREFIX", "bedrock-ingestion/")
 KB_ID = st.secrets["KB_ID"]
 MODEL_ARN = st.secrets["MODEL_ARN"]
+DATA_SOURCE_ID = st.secrets["DATA_SOURCE_ID"]
 MANIFEST_KEY = os.path.join(S3_PREFIX, "manifest.jsonl")
 
 ALLOWED_EXTENSIONS = ['.pdf', '.jpeg', '.jpg', '.png', '.tiff', '.tif']
@@ -105,11 +106,11 @@ def process_doc_with_textract(file_bytes):
         st.error(f"Unexpected error during Textract OCR: {e}")
         return None
 
-def start_bedrock_kb_ingestion(s3_uri):
+def start_bedrock_kb_ingestion():
     try:
         response = clients['bedrock-agent'].start_ingestion_job(
             knowledgeBaseId=KB_ID,
-            dataSource={'s3': {'uri': s3_uri}}
+            dataSourceId=DATA_SOURCE_ID
         )
         job_id = response['ingestionJob']['ingestionJobId']
         return job_id
@@ -255,9 +256,9 @@ with st.expander("Upload Patient Records (PDF, JPEG, PNG, TIFF)"):
                     continue
                 st.success(f"Extracted text saved as {os.path.basename(txt_key)} in S3.")
 
-                # Trigger synchronous Bedrock KB ingestion
+                # Trigger Bedrock KB ingestion (now uses dataSourceId, NOT s3_uri)
                 with st.spinner(f"Ingesting {os.path.basename(txt_key)} into Bedrock Knowledge Base..."):
-                    job_id = start_bedrock_kb_ingestion(txt_s3_uri)
+                    job_id = start_bedrock_kb_ingestion()
                     if not job_id:
                         continue
                     success = wait_for_bedrock_ingestion(job_id)
