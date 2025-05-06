@@ -120,7 +120,7 @@ def start_bedrock_kb_ingestion():
         st.error(f"Error starting Bedrock KB ingestion: {e}")
         return None
 
-def wait_for_bedrock_ingestion(job_id, timeout=120):
+def wait_for_bedrock_ingestion(job_id, timeout=600):
     try:
         start = time.time()
         while True:
@@ -146,13 +146,15 @@ def wait_for_bedrock_ingestion(job_id, timeout=120):
         return False
 
 def get_rag_response(query, session_id):
+    # Include both {search_results} and $search_results$ for maximum compatibility
     prompt_template = (
         "You are an oncology specialist assistant.\n"
         "Use only the information in the knowledge base to answer the question.\n\n"
-        "Context:\n{search_results}\n\n"
-        f"Question: {query}\n\n"
+        "Context:\n{search_results}\n$search_results$\n\n"
+        "Question: " + query + "\n\n"
         "Answer with clinical accuracy. If uncertain, state \"I need to consult medical records.\""
     )
+    st.info(f"Prompt template being sent to Bedrock:\n{prompt_template}")
     try:
         response = clients['bedrock-agent-runtime'].retrieve_and_generate(
             input={'text': query},
