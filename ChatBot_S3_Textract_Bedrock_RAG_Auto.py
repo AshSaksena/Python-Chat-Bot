@@ -1,0 +1,245 @@
+import streamlit as st
+import boto3
+import uuid
+import os
+import json
+import time
+from botocore.exceptions import ClientError, BotoCoreError
+
+# ===== AWS Configuration =====
+AWS_ACCESS_KEY_ID = st.secrets["AWS_ACCESS_KEY_ID"]
+AWS_SECRET_ACCESS_KEY = st.secrets["AWS_SECRET_ACCESS_KEY"]
+AWS_REGION = st.secrets["AWS_REGION"]
+S3_BUCKET = st.secrets["S3_BUCKET"]
+S3_PREFIX = st.secrets.get("S3_PREFIX", "bedrock-ingestion/")
+KB_ID = st.secrets["KB_ID"]
+MODEL_ARN = st.secrets["MODEL_ARN"]
+MANIFEST_KEY = os.path.join(S3_PREFIX, "manifest.jsonl")
+
+# ===== Initialize AWS Clients =====
+@st.cache_resource
+def get_aws_clients():
+    return {
+        'textract': boto3.client('textract', region_name=AWS_REGION,
+                      aws_access_key_id=AWS_ACCESS_KEY_ID,
+                      aws_secret_access_key=AWS_SECRET_ACCESS_KEY),
+        'bedrock-agent': boto3.client('bedrock-agent-runtime', region_name=AWS_REGION,
+                             aws_access_key_id=AWS_ACCESS_KEY_ID,
+                             aws_secret_access_key=AWS_SECRET_ACCESS_KEY),
+        'bedrock-kb': boto3.client('bedrock', region_name=AWS_REGION,
+                             aws_access_key_id=AWS_ACCESS_KEY_ID,
+                             aws_secret_access_key=AWS_SECRET_ACCESS_KEY),
+        's3': boto3.client('s3', region_name=AWS_REGION,
+                           aws_access_key_id=AWS_ACCESS_KEY_ID,
+                           aws_secret_access_key=AWS_SECRET_ACCESS_KEY)
+    }
+
+clients = get_aws_clients()
+
+def s3_key_for_pdf(filename):
+    return os.path.join(S3_PREFIX, filename)
+
+def s3_key_for_txt(filename):
+    return os.path.join(S3_PREFIX, filename.replace('.pdf', '.txt'))
+
+def download_manifest():
+    try:
+        obj = clients['s3'].get_object(Bucket=S3_BUCKET, Key=MANIFEST_KEY)
+        lines = obj['Body'].read().decode('utf-8').splitlines()
+        return [json.loads(line) for line in lines]
+    except ClientError as e:
+        if e.response['Error']['Code'] == "NoSuchKey":
+            return []
+        else:
+            st.error(f"Error downloading manifest: {e}")
+            return []
+    except Exception as e:
+        st.error(f"Unexpected error downloading manifest: {e}")
+        return []
+
+def upload_manifest(manifest):
+    try:
+        body = "\n".join(json.dumps(entry) for entry in manifest)
+        clients['s3'].put_object(Bucket=S3_BUCKET, Key=MANIFEST_KEY, Body=body.encode('utf-8'))
+    except Exception as e:
+        st.error(f"Error uploading manifest: {e}")
+
+def is_in_manifest(filename, manifest):
+    return any(entry.get("filename") == filename for entry in manifest)
+
+def add_to_manifest(filename, txt_s3_uri, manifest):
+    manifest.append({"filename": filename, "txt_s3_uri": txt_s3_uri, "ingested": True})
+    upload_manifest(manifest)
+
+def upload_to_s3(file, bucket, key):
+    try:
+        clients['s3'].upload_fileobj(file, bucket, key)
+        return f"s3://{bucket}/{key}"
+    except Exception as e:
+        st.error(f"Error uploading {key} to S3: {e}")
+        return None
+
+def save_txt_to_s3(text, bucket, key):
+    try:
+        clients['s3'].put_object(Bucket=bucket, Key=key, Body=text.encode("utf-8"))
+        return f"s3://{bucket}/{key}"
+    except Exception as e:
+        st.error(f"Error saving text to S3: {e}")
+        return None
+
+def process_pdf_with_textract(file_bytes):
+    try:
+        response = clients['textract'].analyze_document(
+            Document={'Bytes': file_bytes},
+            FeatureTypes=['FORMS', 'TABLES']
+        )
+        return '\n'.join(block['Text'] for block in response['Blocks'] if block['BlockType'] in ['LINE', 'WORD'])
+    except (BotoCoreError, ClientError) as e:
+        st.error(f"Textract error: {e}")
+        return None
+    except Exception as e:
+        st.error(f"Unexpected error during Textract OCR: {e}")
+        return None
+
+def start_bedrock_kb_ingestion(s3_uri):
+    try:
+        response = clients['bedrock-kb'].start_ingestion_job(
+            knowledgeBaseId=KB_ID,
+            dataSource={'s3': {'uri': s3_uri}}
+        )
+        job_id = response['ingestionJob']['ingestionJobId']
+        return job_id
+    except Exception as e:
+        st.error(f"Error starting Bedrock KB ingestion: {e}")
+        return None
+
+def wait_for_bedrock_ingestion(job_id, timeout=600):
+    try:
+        start = time.time()
+        while True:
+            resp = clients['bedrock-kb'].get_ingestion_job(
+                knowledgeBaseId=KB_ID,
+                ingestionJobId=job_id
+            )
+            status = resp['ingestionJob']['status']
+            if status == "COMPLETED":
+                return True
+            if status in ("FAILED", "STOPPED"):
+                st.error(f"Ingestion job {job_id} failed or stopped.")
+                return False
+            if time.time() - start > timeout:
+                st.error(f"Ingestion job {job_id} timed out.")
+                return False
+            time.sleep(5)
+    except Exception as e:
+        st.error(f"Error checking ingestion job status: {e}")
+        return False
+
+def get_rag_response(query, session_id):
+    prompt_template = f"""You are an oncology specialist assistant.
+    Use only the information in the knowledge base to answer the question.
+
+    Question: {query}
+
+    Answer with clinical accuracy. If uncertain, state "I need to consult medical records"."""
+    try:
+        response = clients['bedrock-agent'].retrieve_and_generate(
+            input={'text': query},
+            retrieveAndGenerateConfiguration={
+                'knowledgeBaseConfiguration': {
+                    'generationConfiguration': {
+                        'promptTemplate': {'textPromptTemplate': prompt_template}
+                    },
+                    'knowledgeBaseId': KB_ID,
+                    'modelArn': MODEL_ARN
+                },
+                'type': 'KNOWLEDGE_BASE'
+            },
+            sessionId=session_id
+        )
+        return response['output']['text'], response.get('sessionId', session_id)
+    except Exception as e:
+        st.error(f"Clinical error: {str(e)}")
+        return "Please consult your physician for immediate concerns.", session_id
+
+# ===== Streamlit UI =====
+st.title("Clinical Oncology Virtual Assistant 🩺")
+
+if 'session_id' not in st.session_state:
+    st.session_state.session_id = str(uuid.uuid4())
+
+if 'messages' not in st.session_state:
+    st.session_state.messages = []
+
+with st.expander("Upload Patient Records (PDF)"):
+    uploaded_files = st.file_uploader(
+        "Upload medical documents (PDF only)",
+        type=['pdf'],
+        accept_multiple_files=True
+    )
+
+    if uploaded_files:
+        manifest = download_manifest()
+        for file in uploaded_files:
+            pdf_key = s3_key_for_pdf(file.name)
+            txt_key = s3_key_for_txt(file.name)
+            txt_s3_uri = f"s3://{S3_BUCKET}/{txt_key}"
+
+            if is_in_manifest(file.name, manifest):
+                st.success(f"{file.name} is already present in Bedrock Knowledge Base.")
+            else:
+                # Upload PDF to S3
+                s3_pdf_uri = upload_to_s3(file, S3_BUCKET, pdf_key)
+                if not s3_pdf_uri:
+                    continue
+                st.info(f"Uploaded {file.name} to S3.")
+
+                # Run Textract OCR
+                with st.spinner(f"Running Textract OCR on {file.name}..."):
+                    file.seek(0)
+                    text = process_pdf_with_textract(file.read())
+                if not text:
+                    st.error(f"OCR failed for {file.name}. Skipping.")
+                    continue
+
+                # Save extracted text to S3
+                s3_txt_uri = save_txt_to_s3(text, S3_BUCKET, txt_key)
+                if not s3_txt_uri:
+                    continue
+                st.success(f"Extracted text saved as {os.path.basename(txt_key)} in S3.")
+
+                # Trigger synchronous Bedrock KB ingestion
+                with st.spinner(f"Ingesting {os.path.basename(txt_key)} into Bedrock Knowledge Base..."):
+                    job_id = start_bedrock_kb_ingestion(txt_s3_uri)
+                    if not job_id:
+                        continue
+                    success = wait_for_bedrock_ingestion(job_id)
+                    if success:
+                        add_to_manifest(file.name, txt_s3_uri, manifest)
+                        st.success(f"{file.name} successfully ingested into Bedrock Knowledge Base.")
+                    else:
+                        st.error(f"Ingestion failed or timed out for {file.name}.")
+
+st.divider()
+
+# Chat Interface
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.write(msg["content"])
+
+if user_input := st.chat_input("Ask about patient records..."):
+    st.chat_message("user").write(user_input)
+    with st.spinner("Consulting medical knowledge..."):
+        response, new_session = get_rag_response(
+            user_input,
+            st.session_state.session_id
+        )
+        st.session_state.session_id = new_session
+
+    with st.chat_message("assistant"):
+        st.write(response)
+
+    st.session_state.messages.extend([
+        {"role": "user", "content": user_input},
+        {"role": "assistant", "content": response}
+    ])
