@@ -15,12 +15,11 @@ S3_BUCKET = st.secrets["S3_BUCKET"]
 S3_PREFIX = st.secrets.get("S3_PREFIX", "bedrock-ingestion/")
 KB_ID = st.secrets["KB_ID"]
 MODEL_ARN = st.secrets["MODEL_ARN"]
-DATA_SOURCE_ID = st.secrets["DATA_SOURCE_ID"] 
+DATA_SOURCE_ID = st.secrets["DATA_SOURCE_ID"]   # <-- Add this to your secrets!
 MANIFEST_KEY = os.path.join(S3_PREFIX, "manifest.jsonl")
 
 ALLOWED_EXTENSIONS = ['.pdf', '.jpeg', '.jpg', '.png', '.tiff', '.tif']
 
-# ===== Initialize AWS Clients =====
 @st.cache_resource
 def get_aws_clients():
     return {
@@ -234,9 +233,6 @@ with st.expander("Upload Patient Records (PDF, JPEG, PNG, TIFF)"):
             if ext in ['.jpeg', '.jpg', '.png', '.tiff', '.tif'] and len(file_bytes) > 10 * 1024 * 1024:
                 st.error(f"{file.name}: Image file is larger than 10MB. Please upload a smaller image.")
                 continue
-
-            # (Optional: upload original file to a raw/holding prefix for record-keeping)
-            # s3_raw_uri = upload_to_s3(io.BytesIO(file_bytes), S3_BUCKET, s3_key_for_doc(file.name))
 
             # Run Textract OCR
             with st.spinner(f"Running Textract OCR on {file.name}..."):
