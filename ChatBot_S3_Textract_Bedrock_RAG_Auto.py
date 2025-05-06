@@ -257,7 +257,7 @@ with st.expander("Upload Patient Records (PDF, JPEG, PNG, TIFF)"):
                     continue
                 st.success(f"Extracted text saved as {os.path.basename(txt_key)} in S3.")
 
-                # Trigger Bedrock KB ingestion (now uses dataSourceId)
+                # Trigger Bedrock KB ingestion
                 with st.spinner(f"Ingesting {os.path.basename(txt_key)} into Bedrock Knowledge Base..."):
                     job_id = start_bedrock_kb_ingestion()
                     if not job_id:
