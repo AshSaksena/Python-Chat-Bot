@@ -15,7 +15,7 @@ S3_BUCKET = st.secrets["S3_BUCKET"]
 S3_PREFIX = st.secrets.get("S3_PREFIX", "bedrock-ingestion/")
 KB_ID = st.secrets["KB_ID"]
 MODEL_ARN = st.secrets["MODEL_ARN"]
-DATA_SOURCE_ID = st.secrets["DATA_SOURCE_ID"]
+DATA_SOURCE_ID = st.secrets["DATA_SOURCE_ID"]   # <-- Add this to your secrets!
 MANIFEST_KEY = os.path.join(S3_PREFIX, "manifest.jsonl")
 
 ALLOWED_EXTENSIONS = ['.pdf', '.jpeg', '.jpg', '.png', '.tiff', '.tif']
@@ -124,6 +124,7 @@ def wait_for_bedrock_ingestion(job_id, timeout=600):
         while True:
             resp = clients['bedrock-agent'].get_ingestion_job(
                 knowledgeBaseId=KB_ID,
+                dataSourceId=DATA_SOURCE_ID,
                 ingestionJobId=job_id
             )
             status = resp['ingestionJob']['status']
@@ -256,7 +257,7 @@ with st.expander("Upload Patient Records (PDF, JPEG, PNG, TIFF)"):
                     continue
                 st.success(f"Extracted text saved as {os.path.basename(txt_key)} in S3.")
 
-                # Trigger Bedrock KB ingestion (now uses dataSourceId, NOT s3_uri)
+                # Trigger Bedrock KB ingestion (now uses dataSourceId)
                 with st.spinner(f"Ingesting {os.path.basename(txt_key)} into Bedrock Knowledge Base..."):
                     job_id = start_bedrock_kb_ingestion()
                     if not job_id:
