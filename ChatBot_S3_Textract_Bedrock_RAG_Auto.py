@@ -4,7 +4,6 @@ import uuid
 import os
 import json
 import time
-import io
 from botocore.exceptions import ClientError, BotoCoreError
 
 # ===== AWS Configuration =====
@@ -15,10 +14,8 @@ S3_BUCKET = st.secrets["S3_BUCKET"]
 S3_PREFIX = st.secrets.get("S3_PREFIX", "bedrock-ingestion/")
 KB_ID = st.secrets["KB_ID"]
 MODEL_ARN = st.secrets["MODEL_ARN"]
-DATA_SOURCE_ID = st.secrets["DATA_SOURCE_ID"]   # <-- Add this to your secrets!
+DATA_SOURCE_ID = st.secrets["DATA_SOURCE_ID"]  # <-- Add this to your secrets!
 MANIFEST_KEY = os.path.join(S3_PREFIX, "manifest.jsonl")
-
-ALLOWED_EXTENSIONS = ['.pdf', '.jpeg', '.jpg', '.png', '.tiff', '.tif']
 
 @st.cache_resource
 def get_aws_clients():
@@ -26,10 +23,10 @@ def get_aws_clients():
         'textract': boto3.client('textract', region_name=AWS_REGION,
                       aws_access_key_id=AWS_ACCESS_KEY_ID,
                       aws_secret_access_key=AWS_SECRET_ACCESS_KEY),
-        'bedrock-agent-runtime': boto3.client('bedrock-agent-runtime', region_name=AWS_REGION,
+        'bedrock-agent': boto3.client('bedrock-agent', region_name=AWS_REGION,
                              aws_access_key_id=AWS_ACCESS_KEY_ID,
                              aws_secret_access_key=AWS_SECRET_ACCESS_KEY),
-        'bedrock-agent': boto3.client('bedrock-agent', region_name=AWS_REGION,
+        'bedrock-agent-runtime': boto3.client('bedrock-agent-runtime', region_name=AWS_REGION,
                              aws_access_key_id=AWS_ACCESS_KEY_ID,
                              aws_secret_access_key=AWS_SECRET_ACCESS_KEY),
         's3': boto3.client('s3', region_name=AWS_REGION,
@@ -39,12 +36,11 @@ def get_aws_clients():
 
 clients = get_aws_clients()
 
-def s3_key_for_doc(filename):
+def s3_key_for_pdf(filename):
     return os.path.join(S3_PREFIX, filename)
 
 def s3_key_for_txt(filename):
-    base, _ = os.path.splitext(filename)
-    return os.path.join(S3_PREFIX, base + '.txt')
+    return os.path.join(S3_PREFIX, filename.replace('.pdf', '.txt'))
 
 def download_manifest():
     try:
@@ -75,9 +71,9 @@ def add_to_manifest(filename, txt_s3_uri, manifest):
     manifest.append({"filename": filename, "txt_s3_uri": txt_s3_uri, "ingested": True})
     upload_manifest(manifest)
 
-def upload_to_s3(file_obj, bucket, key):
+def upload_to_s3(file, bucket, key):
     try:
-        clients['s3'].upload_fileobj(file_obj, bucket, key)
+        clients['s3'].upload_fileobj(file, bucket, key)
         return f"s3://{bucket}/{key}"
     except Exception as e:
         st.error(f"Error uploading {key} to S3: {e}")
@@ -91,7 +87,7 @@ def save_txt_to_s3(text, bucket, key):
         st.error(f"Error saving text to S3: {e}")
         return None
 
-def process_doc_with_textract(file_bytes):
+def process_pdf_with_textract(file_bytes):
     try:
         response = clients['textract'].analyze_document(
             Document={'Bytes': file_bytes},
@@ -140,32 +136,6 @@ def wait_for_bedrock_ingestion(job_id, timeout=600):
         st.error(f"Error checking ingestion job status: {e}")
         return False
 
-def sync_bedrock_knowledge_base():
-    try:
-        response = clients['bedrock-agent'].sync_knowledge_base(
-            knowledgeBaseId=KB_ID
-        )
-        sync_job_id = response['syncJob']['syncJobId']
-        start = time.time()
-        while True:
-            status_resp = clients['bedrock-agent'].get_sync_job(
-                knowledgeBaseId=KB_ID,
-                syncJobId=sync_job_id
-            )
-            status = status_resp['syncJob']['status']
-            if status == "COMPLETED":
-                return True
-            if status in ("FAILED", "STOPPED"):
-                st.error(f"Knowledge base sync job {sync_job_id} failed or stopped.")
-                return False
-            if time.time() - start > 600:
-                st.error(f"Knowledge base sync job {sync_job_id} timed out.")
-                return False
-            time.sleep(5)
-    except Exception as e:
-        st.error(f"Error syncing Bedrock Knowledge Base: {e}")
-        return False
-
 def get_rag_response(query, session_id):
     prompt_template = f"""You are an oncology specialist assistant.
     Use only the information in the knowledge base to answer the question.
@@ -202,63 +172,54 @@ if 'session_id' not in st.session_state:
 if 'messages' not in st.session_state:
     st.session_state.messages = []
 
-with st.expander("Upload Patient Records (PDF, JPEG, PNG, TIFF)"):
+with st.expander("Upload Patient Records (PDF only)"):
     uploaded_files = st.file_uploader(
-        "Upload medical documents (PDF, JPEG, PNG, TIFF)",
-        type=['pdf', 'jpeg', 'jpg', 'png', 'tiff', 'tif'],
+        "Upload medical documents (PDF only)",
+        type=['pdf'],
         accept_multiple_files=True
     )
 
     if uploaded_files:
         manifest = download_manifest()
         for file in uploaded_files:
-            ext = os.path.splitext(file.name)[1].lower()
-            if ext not in ALLOWED_EXTENSIONS:
-                st.error(f"{file.name}: Unsupported file type.")
-                continue
+            pdf_key = s3_key_for_pdf(file.name)
+            txt_key = s3_key_for_txt(file.name)
+            txt_s3_uri = f"s3://{S3_BUCKET}/{txt_key}"
 
             if is_in_manifest(file.name, manifest):
                 st.success(f"{file.name} is already present in Bedrock Knowledge Base.")
-                continue
-
-            file_bytes = file.read()
-
-            # Pre-validation
-            if len(file_bytes) == 0:
-                st.error(f"{file.name}: Uploaded file is empty.")
-                continue
-            if ext == '.pdf' and len(file_bytes) > 5 * 1024 * 1024:
-                st.error(f"{file.name}: PDF is larger than 5MB. Please upload a smaller file.")
-                continue
-            if ext in ['.jpeg', '.jpg', '.png', '.tiff', '.tif'] and len(file_bytes) > 10 * 1024 * 1024:
-                st.error(f"{file.name}: Image file is larger than 10MB. Please upload a smaller image.")
-                continue
-
-            # Run Textract OCR
-            with st.spinner(f"Running Textract OCR on {file.name}..."):
-                text = process_doc_with_textract(file_bytes)
-            if not text:
-                st.error(f"OCR failed for {file.name}. Skipping.")
-                continue
-
-            # Save extracted text to S3 (in the ingestion prefix)
-            txt_key = s3_key_for_txt(file.name)
-            s3_txt_uri = save_txt_to_s3(text, S3_BUCKET, txt_key)
-            if not s3_txt_uri:
-                continue
-            st.success(f"Extracted text saved as {os.path.basename(txt_key)} in S3.")
-
-            # Trigger Bedrock KB ingestion (ingests ALL .txt files in the prefix)
-            with st.spinner(f"Ingesting {os.path.basename(txt_key)} into Bedrock Knowledge Base..."):
-                job_id = start_bedrock_kb_ingestion()
-                if not job_id:
+            else:
+                # Upload PDF to S3
+                s3_pdf_uri = upload_to_s3(file, S3_BUCKET, pdf_key)
+                if not s3_pdf_uri:
                     continue
-                success = wait_for_bedrock_ingestion(job_id)
-                if success:
-                    add_to_manifest(file.name, s3_txt_uri, manifest)
-                    st.success(f"{file.name} successfully ingested into Bedrock Knowledge Base.")
-                else:
-                    st.error(f"Ingestion failed or timed out for {file.name}.")
+                st.info(f"Uploaded {file.name} to S3.")
+
+                # Run Textract OCR
+                with st.spinner(f"Running Textract OCR on {file.name}..."):
+                    file.seek(0)
+                    text = process_pdf_with_textract(file.read())
+                if not text:
+                    st.error(f"OCR failed for {file.name}. Skipping.")
+                    continue
+
+                # Save extracted text to S3
+                s3_txt_uri = save_txt_to_s3(text, S3_BUCKET, txt_key)
+                if not s3_txt_uri:
+                    continue
+                st.success(f"Extracted text saved as {os.path.basename(txt_key)} in S3.")
+
+                # Trigger synchronous Bedrock KB ingestion
+                with st.spinner(f"Ingesting {os.path.basename(txt_key)} into Bedrock Knowledge Base..."):
+                    job_id = start_bedrock_kb_ingestion()
+                    if not job_id:
+                        continue
+                    success = wait_for_bedrock_ingestion(job_id)
+                    if success:
+                        add_to_manifest(file.name, txt_s3_uri, manifest)
+                        st.success(f"{file.name} successfully ingested into Bedrock Knowledge Base.")
+                    else:
+                        st.error(f"Ingestion failed or timed out for {file.name}.")
 
 st.divider()
 
@@ -268,24 +229,18 @@ for msg in st.session_state.messages:
         st.write(msg["content"])
 
 if user_input := st.chat_input("Ask about patient records..."):
-    # Sync knowledge base before inference
-    with st.spinner("Syncing knowledge base with latest data..."):
-        sync_success = sync_bedrock_knowledge_base()
-    if not sync_success:
-        st.error("Knowledge base sync failed. Please try again later.")
-    else:
-        st.chat_message("user").write(user_input)
-        with st.spinner("Consulting medical knowledge..."):
-            response, new_session = get_rag_response(
-                user_input,
-                st.session_state.session_id
-            )
-            st.session_state.session_id = new_session
+    st.chat_message("user").write(user_input)
+    with st.spinner("Consulting medical knowledge..."):
+        response, new_session = get_rag_response(
+            user_input,
+            st.session_state.session_id
+        )
+        st.session_state.session_id = new_session
 
-        with st.chat_message("assistant"):
-            st.write(response)
+    with st.chat_message("assistant"):
+        st.write(response)
 
-        st.session_state.messages.extend([
-            {"role": "user", "content": user_input},
-            {"role": "assistant", "content": response}
-        ])
+    st.session_state.messages.extend([
+        {"role": "user", "content": user_input},
+        {"role": "assistant", "content": response}
+    ])
