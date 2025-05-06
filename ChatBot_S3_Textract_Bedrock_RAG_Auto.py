@@ -4,6 +4,7 @@ import uuid
 import os
 import json
 import time
+import io
 from botocore.exceptions import ClientError, BotoCoreError
 
 # ===== AWS Configuration =====
@@ -71,9 +72,9 @@ def add_to_manifest(filename, txt_s3_uri, manifest):
     manifest.append({"filename": filename, "txt_s3_uri": txt_s3_uri, "ingested": True})
     upload_manifest(manifest)
 
-def upload_to_s3(file, bucket, key):
+def upload_to_s3(file_obj, bucket, key):
     try:
-        clients['s3'].upload_fileobj(file, bucket, key)
+        clients['s3'].upload_fileobj(file_obj, bucket, key)
         return f"s3://{bucket}/{key}"
     except Exception as e:
         st.error(f"Error uploading {key} to S3: {e}")
@@ -188,16 +189,18 @@ with st.expander("Upload Patient Records (PDF)"):
             if is_in_manifest(file.name, manifest):
                 st.success(f"{file.name} is already present in Bedrock Knowledge Base.")
             else:
-                # Upload PDF to S3
-                s3_pdf_uri = upload_to_s3(file, S3_BUCKET, pdf_key)
+                # Read file bytes ONCE
+                file_bytes = file.read()
+
+                # Upload PDF to S3 (wrap in BytesIO)
+                s3_pdf_uri = upload_to_s3(io.BytesIO(file_bytes), S3_BUCKET, pdf_key)
                 if not s3_pdf_uri:
                     continue
                 st.info(f"Uploaded {file.name} to S3.")
 
-                # Run Textract OCR
+                # Run Textract OCR (use the same bytes)
                 with st.spinner(f"Running Textract OCR on {file.name}..."):
-                    file.seek(0)
-                    text = process_pdf_with_textract(file.read())
+                    text = process_pdf_with_textract(file_bytes)
                 if not text:
                     st.error(f"OCR failed for {file.name}. Skipping.")
                     continue
