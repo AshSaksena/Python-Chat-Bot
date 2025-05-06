@@ -146,12 +146,19 @@ def wait_for_bedrock_ingestion(job_id, timeout=120):
         return False
 
 def get_rag_response(query, session_id):
-    prompt_template = f"""You are an oncology specialist assistant.
-    Use only the information in the knowledge base to answer the question.
+    #prompt_template = f"""You are an oncology specialist assistant.
+    #Use only the information in the knowledge base to answer the question.
 
-    Question: {query}
+    #Question: {query}
 
-    Answer with clinical accuracy. If uncertain, state "I need to consult medical records"."""
+    #Answer with clinical accuracy. If uncertain, state "I need to consult medical records"."""
+    prompt_template = (
+    "You are an oncology specialist assistant.\n"
+    "Use only the information in the knowledge base to answer the question.\n\n"
+    "Context from records:\n{search_results}\n\n"
+    f"Question: {query}\n\n"
+    "Answer with clinical accuracy. If uncertain, state \"I need to consult medical records.\"")
+    
     try:
         response = clients['bedrock-agent-runtime'].retrieve_and_generate(
             input={'text': query},
