@@ -16,6 +16,7 @@ KB_ID = st.secrets["KB_ID"]
 MODEL_ARN = st.secrets["MODEL_ARN"]
 DATA_SOURCE_ID = st.secrets["DATA_SOURCE_ID"]
 MANIFEST_KEY = os.path.join(S3_PREFIX, "manifest.jsonl")
+ALLOWED_EXTENSIONS = ['.pdf', '.jpeg', '.jpg', '.png', '.tiff', '.tif']
 
 @st.cache_resource
 def get_aws_clients():
@@ -36,11 +37,12 @@ def get_aws_clients():
 
 clients = get_aws_clients()
 
-def s3_key_for_pdf(filename):
+def s3_key_for_doc(filename):
     return os.path.join(S3_PREFIX, filename)
 
 def s3_key_for_txt(filename):
-    return os.path.join(S3_PREFIX, filename.replace('.pdf', '.txt'))
+    base, _ = os.path.splitext(filename)
+    return os.path.join(S3_PREFIX, base + '.txt')
 
 def download_manifest():
     try:
@@ -91,7 +93,7 @@ def save_txt_to_s3(text, bucket, key):
         st.error(f"Error saving text to S3: {e}")
         return None
 
-def process_pdf_with_textract(file_bytes):
+def process_doc_with_textract(file_bytes):
     try:
         response = clients['textract'].analyze_document(
             Document={'Bytes': file_bytes},
@@ -118,7 +120,7 @@ def start_bedrock_kb_ingestion():
         st.error(f"Error starting Bedrock KB ingestion: {e}")
         return None
 
-def wait_for_bedrock_ingestion(job_id, timeout=150):
+def wait_for_bedrock_ingestion(job_id, timeout=120):
     try:
         start = time.time()
         while True:
@@ -133,7 +135,6 @@ def wait_for_bedrock_ingestion(job_id, timeout=150):
                 return True
             if status in ("FAILED", "STOPPED"):
                 st.error(f"Ingestion job {job_id} failed or stopped.")
-                # Print details for troubleshooting
                 st.error(f"Details: {resp['ingestionJob']}")
                 return False
             if time.time() - start > timeout:
@@ -180,59 +181,74 @@ if 'session_id' not in st.session_state:
 if 'messages' not in st.session_state:
     st.session_state.messages = []
 
-with st.expander("Upload Patient Records (PDF only)"):
+with st.expander("Upload Patient Records (PDF, JPEG, PNG, TIFF)"):
     uploaded_files = st.file_uploader(
-        "Upload medical documents (PDF only)",
-        type=['pdf'],
+        "Upload medical documents (PDF, JPEG, PNG, TIFF)",
+        type=['pdf', 'jpeg', 'jpg', 'png', 'tiff', 'tif'],
         accept_multiple_files=True
     )
 
     if uploaded_files:
         manifest = download_manifest()
         for file in uploaded_files:
-            pdf_key = s3_key_for_pdf(file.name)
-            txt_key = s3_key_for_txt(file.name)
-            txt_s3_uri = f"s3://{S3_BUCKET}/{txt_key}"
+            ext = os.path.splitext(file.name)[1].lower()
+            if ext not in ALLOWED_EXTENSIONS:
+                st.error(f"{file.name}: Unsupported file type.")
+                continue
 
             if is_in_manifest(file.name, manifest):
                 st.success(f"{file.name} is already present in Bedrock Knowledge Base.")
-            else:
-                # Upload PDF to S3
-                s3_pdf_uri = upload_to_s3(file, S3_BUCKET, pdf_key)
-                if not s3_pdf_uri:
+                continue
+
+            file_bytes = file.read()
+
+            # Pre-validation
+            if len(file_bytes) == 0:
+                st.error(f"{file.name}: Uploaded file is empty.")
+                continue
+            if ext == '.pdf' and len(file_bytes) > 5 * 1024 * 1024:
+                st.error(f"{file.name}: PDF is larger than 5MB. Please upload a smaller file.")
+                continue
+            if ext in ['.jpeg', '.jpg', '.png', '.tiff', '.tif'] and len(file_bytes) > 10 * 1024 * 1024:
+                st.error(f"{file.name}: Image file is larger than 10MB. Please upload a smaller image.")
+                continue
+
+            doc_key = s3_key_for_doc(file.name)
+            txt_key = s3_key_for_txt(file.name)
+            txt_s3_uri = f"s3://{S3_BUCKET}/{txt_key}"
+
+            # (Optionally upload original file to S3 for record-keeping)
+            # s3_doc_uri = upload_to_s3(io.BytesIO(file_bytes), S3_BUCKET, doc_key)
+
+            # Run Textract OCR
+            with st.spinner(f"Running Textract OCR on {file.name}..."):
+                text = process_doc_with_textract(file_bytes)
+            if not text:
+                st.error(f"OCR failed for {file.name}. Skipping.")
+                continue
+
+            # Save extracted text to S3
+            s3_txt_uri = save_txt_to_s3(text, S3_BUCKET, txt_key)
+            if not s3_txt_uri:
+                continue
+            st.success(f"Extracted text saved as {os.path.basename(txt_key)} in S3.")
+
+            # Wait for S3 consistency
+            time.sleep(2)
+
+            # Trigger Bedrock KB ingestion
+            st.info(f"Triggering ingestion for {s3_txt_uri}")
+            with st.spinner(f"Ingesting {os.path.basename(txt_key)} into Bedrock Knowledge Base..."):
+                job_id = start_bedrock_kb_ingestion()
+                if not job_id:
                     continue
-                st.info(f"Uploaded {file.name} to S3.")
-
-                # Run Textract OCR
-                with st.spinner(f"Running Textract OCR on {file.name}..."):
-                    file.seek(0)
-                    text = process_pdf_with_textract(file.read())
-                if not text:
-                    st.error(f"OCR failed for {file.name}. Skipping.")
-                    continue
-
-                # Save extracted text to S3
-                s3_txt_uri = save_txt_to_s3(text, S3_BUCKET, txt_key)
-                if not s3_txt_uri:
-                    continue
-                st.success(f"Extracted text saved as {os.path.basename(txt_key)} in S3.")
-
-                # Wait for S3 consistency
-                time.sleep(2)
-
-                # Trigger synchronous Bedrock KB ingestion
-                st.info(f"Triggering ingestion for {s3_txt_uri}")
-                with st.spinner(f"Ingesting {os.path.basename(txt_key)} into Bedrock Knowledge Base..."):
-                    job_id = start_bedrock_kb_ingestion()
-                    if not job_id:
-                        continue
-                    success = wait_for_bedrock_ingestion(job_id)
-                    if success:
-                        add_to_manifest(file.name, txt_s3_uri, manifest)
-                        st.success(f"{file.name} successfully ingested into Bedrock Knowledge Base.")
-                    else:
-                        st.error(f"Ingestion failed or timed out for {file.name}.")
-                        st.info("Check Bedrock Console → Knowledge Base → Data Source → Sync History for details.")
+                success = wait_for_bedrock_ingestion(job_id)
+                if success:
+                    add_to_manifest(file.name, txt_s3_uri, manifest)
+                    st.success(f"{file.name} successfully ingested into Bedrock Knowledge Base.")
+                else:
+                    st.error(f"Ingestion failed or timed out for {file.name}.")
+                    st.info("Check Bedrock Console → Knowledge Base → Data Source → Sync History for details.")
 
 st.divider()
 
