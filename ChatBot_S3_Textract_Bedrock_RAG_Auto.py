@@ -118,7 +118,7 @@ def start_bedrock_kb_ingestion():
         st.error(f"Error starting Bedrock KB ingestion: {e}")
         return None
 
-def wait_for_bedrock_ingestion(job_id, timeout=600):
+def wait_for_bedrock_ingestion(job_id, timeout=150):
     try:
         start = time.time()
         while True:
