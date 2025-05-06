@@ -14,7 +14,7 @@ S3_BUCKET = st.secrets["S3_BUCKET"]
 S3_PREFIX = st.secrets.get("S3_PREFIX", "bedrock-ingestion/")
 KB_ID = st.secrets["KB_ID"]
 MODEL_ARN = st.secrets["MODEL_ARN"]
-DATA_SOURCE_ID = st.secrets["DATA_SOURCE_ID"]  # <-- Add this to your secrets!
+DATA_SOURCE_ID = st.secrets["DATA_SOURCE_ID"]
 MANIFEST_KEY = os.path.join(S3_PREFIX, "manifest.jsonl")
 
 @st.cache_resource
@@ -61,6 +61,7 @@ def upload_manifest(manifest):
     try:
         body = "\n".join(json.dumps(entry) for entry in manifest)
         clients['s3'].put_object(Bucket=S3_BUCKET, Key=MANIFEST_KEY, Body=body.encode('utf-8'))
+        st.info(f"Manifest uploaded to s3://{S3_BUCKET}/{MANIFEST_KEY}")
     except Exception as e:
         st.error(f"Error uploading manifest: {e}")
 
@@ -74,6 +75,7 @@ def add_to_manifest(filename, txt_s3_uri, manifest):
 def upload_to_s3(file, bucket, key):
     try:
         clients['s3'].upload_fileobj(file, bucket, key)
+        st.info(f"Uploaded file to s3://{bucket}/{key}")
         return f"s3://{bucket}/{key}"
     except Exception as e:
         st.error(f"Error uploading {key} to S3: {e}")
@@ -82,6 +84,8 @@ def upload_to_s3(file, bucket, key):
 def save_txt_to_s3(text, bucket, key):
     try:
         clients['s3'].put_object(Bucket=bucket, Key=key, Body=text.encode("utf-8"))
+        st.info(f"Saved .txt to s3://{bucket}/{key}")
+        time.sleep(2)  # S3 consistency wait
         return f"s3://{bucket}/{key}"
     except Exception as e:
         st.error(f"Error saving text to S3: {e}")
@@ -108,6 +112,7 @@ def start_bedrock_kb_ingestion():
             dataSourceId=DATA_SOURCE_ID
         )
         job_id = response['ingestionJob']['ingestionJobId']
+        st.info(f"Started ingestion job with ID: {job_id}")
         return job_id
     except Exception as e:
         st.error(f"Error starting Bedrock KB ingestion: {e}")
@@ -123,10 +128,13 @@ def wait_for_bedrock_ingestion(job_id, timeout=600):
                 ingestionJobId=job_id
             )
             status = resp['ingestionJob']['status']
+            st.info(f"Ingestion job {job_id} status: {status}")
             if status == "COMPLETED":
                 return True
             if status in ("FAILED", "STOPPED"):
                 st.error(f"Ingestion job {job_id} failed or stopped.")
+                # Print details for troubleshooting
+                st.error(f"Details: {resp['ingestionJob']}")
                 return False
             if time.time() - start > timeout:
                 st.error(f"Ingestion job {job_id} timed out.")
@@ -209,7 +217,11 @@ with st.expander("Upload Patient Records (PDF only)"):
                     continue
                 st.success(f"Extracted text saved as {os.path.basename(txt_key)} in S3.")
 
+                # Wait for S3 consistency
+                time.sleep(2)
+
                 # Trigger synchronous Bedrock KB ingestion
+                st.info(f"Triggering ingestion for {s3_txt_uri}")
                 with st.spinner(f"Ingesting {os.path.basename(txt_key)} into Bedrock Knowledge Base..."):
                     job_id = start_bedrock_kb_ingestion()
                     if not job_id:
@@ -220,6 +232,7 @@ with st.expander("Upload Patient Records (PDF only)"):
                         st.success(f"{file.name} successfully ingested into Bedrock Knowledge Base.")
                     else:
                         st.error(f"Ingestion failed or timed out for {file.name}.")
+                        st.info("Check Bedrock Console → Knowledge Base → Data Source → Sync History for details.")
 
 st.divider()
 
