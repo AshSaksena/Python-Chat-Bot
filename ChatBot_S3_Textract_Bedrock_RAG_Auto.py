@@ -17,6 +17,8 @@ KB_ID = st.secrets["KB_ID"]
 MODEL_ARN = st.secrets["MODEL_ARN"]
 MANIFEST_KEY = os.path.join(S3_PREFIX, "manifest.jsonl")
 
+ALLOWED_EXTENSIONS = ['.pdf', '.jpeg', '.jpg', '.png', '.tiff', '.tif']
+
 # ===== Initialize AWS Clients =====
 @st.cache_resource
 def get_aws_clients():
@@ -37,14 +39,11 @@ def get_aws_clients():
 
 clients = get_aws_clients()
 
-ALLOWED_EXTENSIONS = ['.pdf', '.jpeg', '.jpg', '.png', '.tiff', '.tif']
-
 def s3_key_for_doc(filename):
     return os.path.join(S3_PREFIX, filename)
 
 def s3_key_for_txt(filename):
-    # Replace only the last extension with .txt
-    base, ext = os.path.splitext(filename)
+    base, _ = os.path.splitext(filename)
     return os.path.join(S3_PREFIX, base + '.txt')
 
 def download_manifest():
@@ -92,7 +91,7 @@ def save_txt_to_s3(text, bucket, key):
         st.error(f"Error saving text to S3: {e}")
         return None
 
-def process_doc_with_textract(file_bytes, file_ext):
+def process_doc_with_textract(file_bytes):
     try:
         response = clients['textract'].analyze_document(
             Document={'Bytes': file_bytes},
@@ -140,6 +139,32 @@ def wait_for_bedrock_ingestion(job_id, timeout=600):
         st.error(f"Error checking ingestion job status: {e}")
         return False
 
+def sync_bedrock_knowledge_base():
+    try:
+        response = clients['bedrock-kb'].sync_knowledge_base(
+            knowledgeBaseId=KB_ID
+        )
+        sync_job_id = response['syncJob']['syncJobId']
+        start = time.time()
+        while True:
+            status_resp = clients['bedrock-kb'].get_sync_job(
+                knowledgeBaseId=KB_ID,
+                syncJobId=sync_job_id
+            )
+            status = status_resp['syncJob']['status']
+            if status == "COMPLETED":
+                return True
+            if status in ("FAILED", "STOPPED"):
+                st.error(f"Knowledge base sync job {sync_job_id} failed or stopped.")
+                return False
+            if time.time() - start > 600:
+                st.error(f"Knowledge base sync job {sync_job_id} timed out.")
+                return False
+            time.sleep(5)
+    except Exception as e:
+        st.error(f"Error syncing Bedrock Knowledge Base: {e}")
+        return False
+
 def get_rag_response(query, session_id):
     prompt_template = f"""You are an oncology specialist assistant.
     Use only the information in the knowledge base to answer the question.
@@ -176,93 +201,4 @@ if 'session_id' not in st.session_state:
 if 'messages' not in st.session_state:
     st.session_state.messages = []
 
-with st.expander("Upload Patient Records (PDF, JPEG, PNG, TIFF)"):
-    uploaded_files = st.file_uploader(
-        "Upload medical documents (PDF, JPEG, PNG, TIFF)",
-        type=['pdf', 'jpeg', 'jpg', 'png', 'tiff', 'tif'],
-        accept_multiple_files=True
-    )
-
-    if uploaded_files:
-        manifest = download_manifest()
-        for file in uploaded_files:
-            file_ext = os.path.splitext(file.name)[1].lower()
-            if file_ext not in ALLOWED_EXTENSIONS:
-                st.error(f"{file.name}: Unsupported file type.")
-                continue
-
-            # Read file bytes ONCE
-            file_bytes = file.read()
-
-            # Pre-validation
-            if len(file_bytes) == 0:
-                st.error(f"{file.name}: Uploaded file is empty.")
-                continue
-            if file_ext == '.pdf' and len(file_bytes) > 5 * 1024 * 1024:
-                st.error(f"{file.name}: PDF is larger than 5MB. Please upload a smaller file.")
-                continue
-            if file_ext in ['.jpeg', '.jpg', '.png', '.tiff', '.tif'] and len(file_bytes) > 10 * 1024 * 1024:
-                st.error(f"{file.name}: Image file is larger than 10MB. Please upload a smaller image.")
-                continue
-
-            doc_key = s3_key_for_doc(file.name)
-            txt_key = s3_key_for_txt(file.name)
-            txt_s3_uri = f"s3://{S3_BUCKET}/{txt_key}"
-
-            if is_in_manifest(file.name, manifest):
-                st.success(f"{file.name} is already present in Bedrock Knowledge Base.")
-            else:
-                # Upload file to S3 (wrap in BytesIO)
-                s3_doc_uri = upload_to_s3(io.BytesIO(file_bytes), S3_BUCKET, doc_key)
-                if not s3_doc_uri:
-                    continue
-                st.info(f"Uploaded {file.name} to S3.")
-
-                # Run Textract OCR (use the same bytes)
-                with st.spinner(f"Running Textract OCR on {file.name}..."):
-                    text = process_doc_with_textract(file_bytes, file_ext)
-                if not text:
-                    st.error(f"OCR failed for {file.name}. Skipping.")
-                    continue
-
-                # Save extracted text to S3
-                s3_txt_uri = save_txt_to_s3(text, S3_BUCKET, txt_key)
-                if not s3_txt_uri:
-                    continue
-                st.success(f"Extracted text saved as {os.path.basename(txt_key)} in S3.")
-
-                # Trigger synchronous Bedrock KB ingestion
-                with st.spinner(f"Ingesting {os.path.basename(txt_key)} into Bedrock Knowledge Base..."):
-                    job_id = start_bedrock_kb_ingestion(txt_s3_uri)
-                    if not job_id:
-                        continue
-                    success = wait_for_bedrock_ingestion(job_id)
-                    if success:
-                        add_to_manifest(file.name, txt_s3_uri, manifest)
-                        st.success(f"{file.name} successfully ingested into Bedrock Knowledge Base.")
-                    else:
-                        st.error(f"Ingestion failed or timed out for {file.name}.")
-
-st.divider()
-
-# Chat Interface
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.write(msg["content"])
-
-if user_input := st.chat_input("Ask about patient records..."):
-    st.chat_message("user").write(user_input)
-    with st.spinner("Consulting medical knowledge..."):
-        response, new_session = get_rag_response(
-            user_input,
-            st.session_state.session_id
-        )
-        st.session_state.session_id = new_session
-
-    with st.chat_message("assistant"):
-        st.write(response)
-
-    st.session_state.messages.extend([
-        {"role": "user", "content": user_input},
-        {"role": "assistant", "content": response}
-    ])
+with st.expander("Upload Patient Records (PDF, JPEG
