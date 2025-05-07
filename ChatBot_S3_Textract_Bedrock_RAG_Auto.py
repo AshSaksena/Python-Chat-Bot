@@ -162,7 +162,9 @@ def get_rag_response(query, session_id):
                 'knowledgeBaseConfiguration': {
                     'knowledgeBaseId': KB_ID,
                     'modelArn': MODEL_ARN,
-                    'promptTemplate': {'textPromptTemplate': prompt_template}
+                    'generationConfiguration': {
+                        'promptTemplate': {'textPromptTemplate': prompt_template}
+                    }
                 }
             },
             sessionId=session_id
