@@ -149,11 +149,12 @@ def get_rag_response(query, session_id=None):
     prompt_template = (
         "You are an oncology specialist assistant.\n"
         "Use only the information in the knowledge base to answer the question.\n\n"
-        "Context:\n{search_results}\n\n"
-        "If the question refers to a specific file (e.g., RB_Rpt4), look for that file's content in the context. "
+        "Context:\n{{search_results}}\n\n"
+        "If the question refers to a specific file (e.g., RB_Rpt3), look for that file's content in the context. "
+        "If the question refers to name, location or date, look for that information in the file's content and in the context. "
         "If you cannot find the answer, say 'I need to consult medical records.'\n"
         "Question: " + query + "\n\n"
-        "Answer with clinical accuracy."
+        "Answer with comprehensive clinical accuracy."
     )
     st.info(f"Prompt template being sent to Bedrock:\n{prompt_template}")
     try:
