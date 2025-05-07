@@ -4,7 +4,6 @@ import uuid
 import os
 import json
 import time
-import re
 from botocore.exceptions import ClientError, BotoCoreError
 
 # ===== AWS Configuration =====
@@ -108,20 +107,6 @@ def process_doc_with_textract(file_bytes):
         st.error(f"Unexpected error during Textract OCR: {e}")
         return None
 
-def extract_metadata(text):
-    # Very basic regex-based extraction; customize for your document structure!
-    name = None
-    date = None
-    # Try to find a patient name (look for "Name:" or similar)
-    name_match = re.search(r'(?:Patient\s*Name|Name)\s*[:\-]?\s*([A-Za-z ]+)', text, re.IGNORECASE)
-    if name_match:
-        name = name_match.group(1).strip()
-    # Try to find a date (look for "Date:" or similar)
-    date_match = re.search(r'(?:Date|Dated)\s*[:\-]?\s*([0-9]{1,2}[/-][0-9]{1,2}[/-][0-9]{2,4})', text)
-    if date_match:
-        date = date_match.group(1).strip()
-    return name, date
-
 def start_bedrock_kb_ingestion():
     try:
         response = clients['bedrock-agent'].start_ingestion_job(
@@ -164,11 +149,9 @@ def get_rag_response(query, session_id=None):
     prompt_template = (
         "You are an oncology specialist assistant.\n"
         "Use only the information in the knowledge base to answer the question.\n\n"
-        "Context:\n{{search_results}}\n\n"
-        "If the question refers to a specific file (e.g., RB_Rpt4) or patient, look for that file's or patient's content in the context. "
-        "If you cannot find the answer, say 'I need to consult medical records.'\n"
-        f"Question: {query}\n\n"
-        "Answer with clinical accuracy."
+        "Context:\n{search_results}\n$search_results$\n\n"
+        "Question: " + query + "\n\n"
+        "Answer with clinical accuracy. If uncertain, state \"I need to consult medical records.\""
     )
     st.info(f"Prompt template being sent to Bedrock:\n{prompt_template}")
     try:
@@ -242,28 +225,15 @@ with st.expander("Upload Patient Records (PDF, JPEG, PNG, TIFF)"):
             txt_key = s3_key_for_txt(file.name)
             txt_s3_uri = f"s3://{S3_BUCKET}/{txt_key}"
 
+            # (Optionally upload original file to S3 for record-keeping)
+            # s3_doc_uri = upload_to_s3(io.BytesIO(file_bytes), S3_BUCKET, doc_key)
+
             # Run Textract OCR
             with st.spinner(f"Running Textract OCR on {file.name}..."):
                 text = process_doc_with_textract(file_bytes)
             if not text:
                 st.error(f"OCR failed for {file.name}. Skipping.")
                 continue
-
-            # === IMPROVED METADATA PREPENDING ===
-            patient_name, report_date = extract_metadata(text)
-            metadata_lines = [
-                f"Filename: {file.name}",
-                f"Patient Name: {patient_name if patient_name else '[Unknown]'}",
-                f"Report Date: {report_date if report_date else '[Unknown]'}"
-            ]
-            # You can add more metadata fields here if you can extract them.
-            text = "\n".join(metadata_lines) + "\n" + text
-
-            # === CHUNKING ADVICE ===
-            # If you want to pre-chunk documents manually (for chunkingStrategy NONE in Bedrock), split text here
-            # For most users, let Bedrock handle chunking (default is ~300 tokens per chunk, or configure FIXED_SIZE)
-            # See https://docs.aws.amazon.com/bedrock/latest/userguide/kb-chunking.html
-            # For large documents, consider splitting on section headers, test names, or similar.
 
             # Save extracted text to S3
             s3_txt_uri = save_txt_to_s3(text, S3_BUCKET, txt_key)
