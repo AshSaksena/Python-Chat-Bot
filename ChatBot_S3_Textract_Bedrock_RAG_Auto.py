@@ -146,7 +146,6 @@ def wait_for_bedrock_ingestion(job_id, timeout=600):
         return False
 
 def get_rag_response(query, session_id):
-    # Both placeholders for maximum compatibility
     prompt_template = (
         "You are an oncology specialist assistant.\n"
         "Use only the information in the knowledge base to answer the question.\n\n"
@@ -172,19 +171,11 @@ def get_rag_response(query, session_id):
         )
         return response['output']['text'], response.get('sessionId', session_id)
     except Exception as e:
-        # Reset session if invalid/expired
-        if "Session with Id" in str(e) and "is not valid" in str(e):
-            st.warning("Session expired or invalid. Resetting session. Please ask your question again.")
-            st.session_state.session_id = str(uuid.uuid4())
-            return "Session expired. Please ask your question again.", st.session_state.session_id
         st.error(f"Clinical error: {str(e)}")
         return "Please consult your physician for immediate concerns.", session_id
 
 # ===== Streamlit UI =====
 st.title("Clinical Oncology Virtual Assistant 🩺")
-
-if 'session_id' not in st.session_state:
-    st.session_state.session_id = str(uuid.uuid4())
 
 if 'messages' not in st.session_state:
     st.session_state.messages = []
@@ -268,11 +259,8 @@ for msg in st.session_state.messages:
 if user_input := st.chat_input("Ask about patient records..."):
     st.chat_message("user").write(user_input)
     with st.spinner("Consulting medical knowledge..."):
-        response, new_session = get_rag_response(
-            user_input,
-            st.session_state.session_id
-        )
-        st.session_state.session_id = new_session
+        session_id = str(uuid.uuid4())  # Always use a new session for each question
+        response, _ = get_rag_response(user_input, session_id)
 
     with st.chat_message("assistant"):
         st.write(response)
