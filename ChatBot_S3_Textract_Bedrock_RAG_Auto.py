@@ -150,11 +150,10 @@ def get_rag_response(query, session_id=None):
         "You are an oncology specialist assistant.\n"
         "Use only the information in the knowledge base to answer the question.\n\n"
         "Context:\n{{search_results}}\n\n"
-        "If the question refers to a specific file (e.g., RB_Rpt3), look for that file's content in the context. "
-        "If the question refers to name, location or date, look for that information in the file's content and in the context. "
+        "If the question refers to a specific file (e.g., RB_Rpt4), look for that file's content in the context. "
         "If you cannot find the answer, say 'I need to consult medical records.'\n"
-        "Question: " + query + "\n\n"
-        "Answer with comprehensive clinical accuracy."
+        f"Question: {query}\n\n"
+        "Answer with clinical accuracy."
     )
     st.info(f"Prompt template being sent to Bedrock:\n{prompt_template}")
     try:
@@ -235,7 +234,7 @@ with st.expander("Upload Patient Records (PDF, JPEG, PNG, TIFF)"):
                 st.error(f"OCR failed for {file.name}. Skipping.")
                 continue
 
-            # === IMPROVEMENT A: Prepend filename to text before uploading ===
+            # Prepend filename to text before uploading (for better retrieval)
             text = f"Filename: {file.name}\n" + text
 
             # Save extracted text to S3
