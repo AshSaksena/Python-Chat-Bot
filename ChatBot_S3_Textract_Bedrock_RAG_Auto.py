@@ -149,9 +149,11 @@ def get_rag_response(query, session_id=None):
     prompt_template = (
         "You are an oncology specialist assistant.\n"
         "Use only the information in the knowledge base to answer the question.\n\n"
-        "Context:\n{search_results}\n$search_results$\n\n"
+        "Context:\n{search_results}\n\n"
+        "If the question refers to a specific file (e.g., RB_Rpt4), look for that file's content in the context. "
+        "If you cannot find the answer, say 'I need to consult medical records.'\n"
         "Question: " + query + "\n\n"
-        "Answer with clinical accuracy. If uncertain, state \"I need to consult medical records.\""
+        "Answer with clinical accuracy."
     )
     st.info(f"Prompt template being sent to Bedrock:\n{prompt_template}")
     try:
@@ -225,15 +227,15 @@ with st.expander("Upload Patient Records (PDF, JPEG, PNG, TIFF)"):
             txt_key = s3_key_for_txt(file.name)
             txt_s3_uri = f"s3://{S3_BUCKET}/{txt_key}"
 
-            # (Optionally upload original file to S3 for record-keeping)
-            # s3_doc_uri = upload_to_s3(io.BytesIO(file_bytes), S3_BUCKET, doc_key)
-
             # Run Textract OCR
             with st.spinner(f"Running Textract OCR on {file.name}..."):
                 text = process_doc_with_textract(file_bytes)
             if not text:
                 st.error(f"OCR failed for {file.name}. Skipping.")
                 continue
+
+            # === IMPROVEMENT A: Prepend filename to text before uploading ===
+            text = f"Filename: {file.name}\n" + text
 
             # Save extracted text to S3
             s3_txt_uri = save_txt_to_s3(text, S3_BUCKET, txt_key)
