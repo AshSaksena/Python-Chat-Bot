@@ -145,7 +145,7 @@ def wait_for_bedrock_ingestion(job_id, timeout=600):
         st.error(f"Error checking ingestion job status: {e}")
         return False
 
-def get_rag_response(query, session_id):
+def get_rag_response(query, session_id=None):
     prompt_template = (
         "You are an oncology specialist assistant.\n"
         "Use only the information in the knowledge base to answer the question.\n\n"
@@ -155,9 +155,9 @@ def get_rag_response(query, session_id):
     )
     st.info(f"Prompt template being sent to Bedrock:\n{prompt_template}")
     try:
-        response = clients['bedrock-agent-runtime'].retrieve_and_generate(
-            input={'text': query},
-            retrieveAndGenerateConfiguration={
+        kwargs = {
+            "input": {'text': query},
+            "retrieveAndGenerateConfiguration": {
                 'type': 'KNOWLEDGE_BASE',
                 'knowledgeBaseConfiguration': {
                     'knowledgeBaseId': KB_ID,
@@ -166,12 +166,19 @@ def get_rag_response(query, session_id):
                         'promptTemplate': {'textPromptTemplate': prompt_template}
                     }
                 }
-            },
-            sessionId=session_id
-        )
-        return response['output']['text'], response.get('sessionId', session_id)
+            }
+        }
+        if session_id:
+            kwargs["sessionId"] = session_id
+
+        response = clients['bedrock-agent-runtime'].retrieve_and_generate(**kwargs)
+        # Always update session_id with what Bedrock returns
+        return response['output']['text'], response.get('sessionId')
     except Exception as e:
         st.error(f"Clinical error: {str(e)}")
+        # If session error, clear session_id so a new one is started next time
+        if "Session with Id" in str(e) and "is not valid" in str(e):
+            return "Session expired or invalid. Please try again.", None
         return "Please consult your physician for immediate concerns.", session_id
 
 # ===== Streamlit UI =====
@@ -179,6 +186,8 @@ st.title("Clinical Oncology Virtual Assistant 🩺")
 
 if 'messages' not in st.session_state:
     st.session_state.messages = []
+if 'session_id' not in st.session_state:
+    st.session_state.session_id = None
 
 with st.expander("Upload Patient Records (PDF, JPEG, PNG, TIFF)"):
     uploaded_files = st.file_uploader(
@@ -259,8 +268,13 @@ for msg in st.session_state.messages:
 if user_input := st.chat_input("Ask about patient records..."):
     st.chat_message("user").write(user_input)
     with st.spinner("Consulting medical knowledge..."):
-        session_id = str(uuid.uuid4())  # Always use a new session for each question
-        response, _ = get_rag_response(user_input, session_id)
+        response, new_session_id = get_rag_response(user_input, st.session_state.session_id)
+        # If Bedrock returns a new session_id, store it
+        if new_session_id:
+            st.session_state.session_id = new_session_id
+        else:
+            # If session invalid, clear it so next query starts a new session
+            st.session_state.session_id = None
 
     with st.chat_message("assistant"):
         st.write(response)
