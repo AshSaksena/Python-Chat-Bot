@@ -158,14 +158,9 @@ def get_rag_response(query, session_id):
         response = clients['bedrock-agent-runtime'].retrieve_and_generate(
             input={'text': query},
             retrieveAndGenerateConfiguration={
-                'knowledgeBaseConfiguration': {
-                    'generationConfiguration': {
-                        'promptTemplate': {'textPromptTemplate': prompt_template}
-                    },
-                    'knowledgeBaseId': KB_ID,
-                    'modelArn': MODEL_ARN
-                },
-                'type': 'KNOWLEDGE_BASE'
+                'knowledgeBaseId': KB_ID,
+                'modelArn': MODEL_ARN,
+                'promptTemplate': {'textPromptTemplate': prompt_template}
             },
             sessionId=session_id
         )
