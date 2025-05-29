@@ -4,6 +4,7 @@ import uuid
 import os
 import json
 import time
+import io
 from botocore.exceptions import ClientError, BotoCoreError
 
 # ===== AWS Configuration =====
@@ -93,13 +94,56 @@ def save_txt_to_s3(text, bucket, key):
         st.error(f"Error saving text to S3: {e}")
         return None
 
-def process_doc_with_textract(file_bytes):
+# === UPDATED FUNCTION: Handles both images and PDFs ===
+def process_doc_with_textract(file_bytes, ext, filename):
     try:
-        response = clients['textract'].analyze_document(
-            Document={'Bytes': file_bytes},
-            FeatureTypes=['FORMS', 'TABLES']
-        )
-        return '\n'.join(block['Text'] for block in response['Blocks'] if block['BlockType'] in ['LINE', 'WORD'])
+        if ext in ['.jpeg', '.jpg', '.png', '.tiff', '.tif']:
+            # For images, use the synchronous API
+            response = clients['textract'].analyze_document(
+                Document={'Bytes': file_bytes},
+                FeatureTypes=['FORMS', 'TABLES']
+            )
+            return '\n'.join(block['Text'] for block in response['Blocks'] if block['BlockType'] in ['LINE', 'WORD'])
+
+        elif ext == '.pdf':
+            # For PDFs, upload to S3 and use the async API
+            temp_pdf_key = f"textract-temp/{uuid.uuid4()}-{filename}"
+            clients['s3'].put_object(Bucket=S3_BUCKET, Key=temp_pdf_key, Body=file_bytes)
+            s3_obj = {'S3Object': {'Bucket': S3_BUCKET, 'Name': temp_pdf_key}}
+
+            start_response = clients['textract'].start_document_analysis(
+                DocumentLocation=s3_obj,
+                FeatureTypes=['FORMS', 'TABLES']
+            )
+            job_id = start_response['JobId']
+
+            # Wait for job to complete (polling)
+            while True:
+                job_status = clients['textract'].get_document_analysis(JobId=job_id)
+                status = job_status['JobStatus']
+                if status in ['SUCCEEDED', 'FAILED']:
+                    break
+                time.sleep(5)
+            if status == 'FAILED':
+                st.error(f"Textract PDF analysis failed: {job_status.get('StatusMessage', '')}")
+                return None
+
+            # Gather results (pagination)
+            blocks = []
+            next_token = None
+            while True:
+                if next_token:
+                    job_status = clients['textract'].get_document_analysis(JobId=job_id, NextToken=next_token)
+                blocks.extend(job_status['Blocks'])
+                next_token = job_status.get('NextToken')
+                if not next_token:
+                    break
+            return '\n'.join(block['Text'] for block in blocks if block['BlockType'] in ['LINE', 'WORD'])
+
+        else:
+            st.error("Unsupported file type for Textract.")
+            return None
+
     except (BotoCoreError, ClientError) as e:
         st.error(f"Textract error: {e}")
         return None
@@ -209,7 +253,6 @@ with st.expander("Upload Patient Records (PDF, JPEG, PNG, TIFF)"):
                 continue
 
             file_bytes = file.read()
-
             # Pre-validation
             if len(file_bytes) == 0:
                 st.error(f"{file.name}: Uploaded file is empty.")
@@ -230,7 +273,7 @@ with st.expander("Upload Patient Records (PDF, JPEG, PNG, TIFF)"):
 
             # Run Textract OCR
             with st.spinner(f"Running Textract OCR on {file.name}..."):
-                text = process_doc_with_textract(file_bytes)
+                text = process_doc_with_textract(file_bytes, ext, file.name)
             if not text:
                 st.error(f"OCR failed for {file.name}. Skipping.")
                 continue
