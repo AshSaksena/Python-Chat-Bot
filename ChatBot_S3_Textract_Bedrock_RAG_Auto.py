@@ -257,11 +257,11 @@ with st.expander("Upload Patient Records (PDF, JPEG, PNG, TIFF)"):
             if len(file_bytes) == 0:
                 st.error(f"{file.name}: Uploaded file is empty.")
                 continue
-            if ext == '.pdf' and len(file_bytes) > 5 * 1024 * 1024:
-                st.error(f"{file.name}: PDF is larger than 5MB. Please upload a smaller file.")
+            if ext == '.pdf' and len(file_bytes) > 500 * 1024 * 1024:
+                st.error(f"{file.name}: PDF is larger than 500MB. Please upload a smaller file.")
                 continue
-            if ext in ['.jpeg', '.jpg', '.png', '.tiff', '.tif'] and len(file_bytes) > 10 * 1024 * 1024:
-                st.error(f"{file.name}: Image file is larger than 10MB. Please upload a smaller image.")
+            if ext in ['.jpeg', '.jpg', '.png', '.tiff', '.tif'] and len(file_bytes) > 500 * 1024 * 1024:
+                st.error(f"{file.name}: Image file is larger than 500MB. Please upload a smaller image.")
                 continue
 
             doc_key = s3_key_for_doc(file.name)
